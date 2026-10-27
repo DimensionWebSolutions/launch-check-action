@@ -1,1 +1,2 @@
 name: Launchpad launch check for AI-built apps
+description: Checks an AI-built app for what breaks at launch and comments each fix on the pull request.
