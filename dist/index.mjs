@@ -738,7 +738,7 @@ var FIXES = [
   },
   {
     slug: "missing-environment-variables-in-production",
-    title: "Works locally, blank or broken in production: missing environment variables",
+    title: "Blank page in production: missing environment variables",
     summary: "The deployed app shows a blank page or errors that never happen locally. Usually a key the code reads was set on your computer, or in the AI tool, and never on the host.",
     group: "Deploys that break",
     tools: ["lovable", "bolt", "v0"],
@@ -776,7 +776,7 @@ var FIXES = [
   },
   {
     slug: "server-fixed-port-5000",
-    title: "Deploy fails its health check: the server always listens on port 5000",
+    title: "Deploy fails its health check: server stuck on port 5000",
     summary: "Replit apps listen on port 5000. Other hosts tell the app which port to use in PORT, so a fixed port is never reached and the deploy fails.",
     group: "Deploys that break",
     tools: ["replit"],
@@ -791,7 +791,7 @@ var FIXES = [
   // ---------- security holes ----------
   {
     slug: "supabase-row-level-security",
-    title: "Supabase tables without Row Level Security: anyone can read and change your data",
+    title: "Supabase tables without Row Level Security are public",
     summary: "With Row Level Security off, or a policy of using (true), the public anon key in your app lets anyone read, change or delete every row. The app still works, which is why nobody notices.",
     group: "Security holes",
     tools: ["lovable", "bolt"],
@@ -900,7 +900,7 @@ var FIXES = [
   },
   {
     slug: "firebase-rules-open",
-    title: "Firebase rules let anyone write (or test mode is about to expire)",
+    title: "Firebase rules let anyone write, or test mode is expiring",
     summary: "Firestore in test mode, or rules with allow write: if true, let anyone change or delete your data, and test mode switches everything off on its expiry date.",
     group: "Security holes",
     tools: [],
@@ -1123,12 +1123,13 @@ async function gh(g, method, path, body2) {
   });
 }
 async function upsertComment(g, pr, body2) {
+  const me = await gh(g, "GET", "/user").then(async (r) => r.ok ? (await r.json()).login : (await r.body?.cancel(), void 0), () => void 0) ?? "github-actions[bot]";
   let existing;
   for (let page = 1; page <= 10 && existing === void 0; page++) {
     const res2 = await gh(g, "GET", `/repos/${g.repo}/issues/${pr}/comments?per_page=100&page=${page}`);
     if (!res2.ok) throw new Error(`reading the pull request's comments: HTTP ${res2.status}`);
     const list = await res2.json();
-    existing = list.find((c) => c.body?.startsWith(MARKER))?.id;
+    existing = list.find((c) => c.body?.startsWith(MARKER) && c.user?.login === me)?.id;
     if (list.length < 100) break;
   }
   const res = existing === void 0 ? await gh(g, "POST", `/repos/${g.repo}/issues/${pr}/comments`, { body: body2 }) : await gh(g, "PATCH", `/repos/${g.repo}/issues/comments/${existing}`, { body: body2 });
