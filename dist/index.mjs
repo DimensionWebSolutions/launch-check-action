@@ -151,6 +151,12 @@ function findSecrets(path, text) {
 }
 var BUILTIN_ENV = /^(NODE_ENV|PORT|HOST|HOSTNAME|CI|TZ|PWD|HOME|VERCEL|VERCEL_[A-Z_]+|NEXT_RUNTIME|NEXT_PHASE|NEXT_PUBLIC_VERCEL_[A-Z_]+|DEV|PROD|MODE|SSR|BASE_URL|RENDER|RENDER_[A-Z_]+|CF_PAGES[A-Z_]*|npm_[a-z_]+)$/;
 var PUBLIC_PREFIX = /^(NEXT_PUBLIC_|VITE_|PUBLIC_|EXPO_PUBLIC_|REACT_APP_|NUXT_PUBLIC_)/;
+function envFileNames(text) {
+  return text.split(/\r?\n/).flatMap((line) => {
+    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    return m && m[2].trim().replace(/^(["'])(.*)\1$/, "$2").trim() !== "" ? [m[1]] : [];
+  });
+}
 var SECRET_NAME = /(SECRET|SERVICE_ROLE|PRIVATE_KEY|PASSWORD|OPENAI|ANTHROPIC|RESEND|DATABASE_URL|STRIPE_SK)/;
 var LOCALHOST_USE = /(fetch|axios(\.\w+)?|ky|got|redirect\w*|href|location(\.href)?|new URL|callbackURL|callbackUrl|emailRedirectTo|redirectTo|baseURL|baseUrl|apiUrl|API_URL|endpoint|url)\s*[(:=]\s*\(?\s*["'`]https?:\/\/(localhost|127\.0\.0\.1)\b/i;
 var HEADER_NAMES = /(Content-Security-Policy|Strict-Transport-Security|X-Frame-Options|X-Content-Type-Options)/i;
@@ -219,14 +225,26 @@ function analyse(blobs, files, env, sql) {
   } else {
     add({ id: "secrets", group: "Security", title: "No secret keys in the code", status: "pass", detail: "None of the files read contain a recognisable API key, private key or password." });
   }
-  if (realEnv.length) {
+  const leaky = realEnv.filter((p) => envFileNames(files.get(p) ?? "").some((n) => !PUBLIC_PREFIX.test(n)));
+  if (leaky.length) {
     add({
       id: "env-files",
       group: "Security",
       title: ".env file committed",
       status: "fail",
-      detail: `${realEnv.length === 1 ? "A .env file is" : `${realEnv.length} .env files are`} in the repo. These usually hold real keys.`,
+      detail: `${leaky.length === 1 ? "A .env file is" : `${leaky.length} .env files are`} in the repo, with values that aren't meant for the browser. These usually hold real keys.`,
       fix: "Remove the file from git (git rm --cached), add .env* to .gitignore, and rotate any keys it held. Keep a .env.example with names only.",
+      where: leaky.slice(0, WHERE),
+      launchpad: true
+    });
+  } else if (realEnv.length) {
+    add({
+      id: "env-files",
+      group: "Security",
+      title: ".env file committed, with public values only",
+      status: "warn",
+      detail: `${realEnv.length === 1 ? "A .env file is" : `${realEnv.length} .env files are`} in the repo. Every value in ${realEnv.length === 1 ? "it" : "them"} has a browser prefix, so the live app shows ${realEnv.length === 1 ? "it" : "them"} to every visitor anyway: nothing has leaked. But the next key added there will be in git history for good.`,
+      fix: "Remove the file from git (git rm --cached), add .env* to .gitignore, and keep a .env.example with names only.",
       where: realEnv.slice(0, WHERE),
       launchpad: true
     });
@@ -312,7 +330,9 @@ function analyse(blobs, files, env, sql) {
         const body2 = m[3].toLowerCase().replace(/\s+/g, " ");
         const writes = /\bfor (all|insert|update|delete)\b/.test(body2) || !/\bfor (select)\b/.test(body2);
         const anyone = /using \(\s*true\s*\)|with check \(\s*true\s*\)/.test(body2);
-        if (writes && anyone) open.push(`${p}:${t.slice(0, m.index).split("\n").length}`);
+        const roles = (/\bto\s+([\w\s,"]+?)(?=\s+(?:using|with)\b|$)/.exec(body2)?.[1] ?? "").split(",").map((r) => r.replace(/"/g, "").trim()).filter(Boolean);
+        const serverOnly = roles.length > 0 && roles.every((r) => ["service_role", "postgres", "supabase_admin"].includes(r));
+        if (writes && anyone && !serverOnly) open.push(`${p}:${t.slice(0, m.index).split("\n").length}`);
       }
     }
     if (open.length) {
@@ -321,7 +341,7 @@ function analyse(blobs, files, env, sql) {
         group: "Security",
         title: "Policies that let anyone change data",
         status: "fail",
-        detail: `${open.length === 1 ? "A policy allows" : `${open.length} policies allow`} writes with "using (true)" or "with check (true)", which means anyone, signed in or not. Row Level Security is on, but it isn't protecting anything.`,
+        detail: `${open.length === 1 ? "A policy allows" : `${open.length} policies allow`} writes with "using (true)" or "with check (true)", so everyone the policy names (everyone, or everyone signed in) can change any row, not just their own. Row Level Security is on, but it isn't protecting that data.`,
         fix: `Tie each write policy to the user, e.g. "using (auth.uid() = user_id)". Keep "true" only on read policies for data that's meant to be public.`,
         where: open.slice(0, WHERE)
       });
@@ -419,7 +439,7 @@ function analyse(blobs, files, env, sql) {
   if (headerFiles.some(([, t]) => HEADER_NAMES.test(t)) || anyCode(/Content-Security-Policy|Strict-Transport-Security/i) || uses(/^helmet$/)) {
     add({ id: "headers", group: "Security", title: "Security headers are set", status: "pass", detail: "The app sets security headers such as a Content Security Policy." });
   } else if (pkgs.length) {
-    add({ id: "headers", group: "Security", title: "No security headers", status: "warn", detail: "No Content-Security-Policy, Strict-Transport-Security or X-Frame-Options headers were found. They block whole classes of attacks such as clickjacking and injected scripts.", fix: stack.includes("Next.js") ? "Return them from headers() in next.config." : "Set them in your host's config (vercel.json, _headers) or your server.", launchpad: true });
+    add({ id: "headers", group: "Security", title: "No security headers", status: "warn", detail: "No Content-Security-Policy, Strict-Transport-Security or X-Frame-Options headers were found. They block whole classes of attacks such as clickjacking and injected scripts.", fix: stack.includes("Next.js") ? "Return them from headers() in next.config." : "Set them in your host's config (vercel.json, _headers) or your server." });
   }
   const forms = code2.filter(([p, t]) => /\.[jt]sx$/.test(p) && /<form\b/.test(t));
   if (forms.length) {
@@ -966,7 +986,7 @@ var FIXES = [
       "Send from an address on that domain, and give replies somewhere to go (an MX record)."
     ],
     ask: "Make the app send all email from an address on my own domain, read from an EMAIL_FROM environment variable, through Resend, and list the DNS records I need to add.",
-    checks: ["spf", "dkim", "dmarc", "mx"],
+    checks: ["spf", "dkim", "dmarc", "mx", "email"],
     launchpad: "The launch check reads your domain's SPF, DMARC and Resend DKIM records. Launchpad creates the sending domain on Resend and, with your DNS on Cloudflare, adds the records itself.",
     related: ["stripe-webhook-not-verified"]
   },
@@ -986,6 +1006,98 @@ var FIXES = [
     checks: ["stripe-webhook"],
     launchpad: "The launch check flags missing and unverified webhooks. Launchpad creates the webhook in your Stripe account and sets `STRIPE_WEBHOOK_SECRET` for you.",
     related: ["api-routes-anyone-can-call"]
+  },
+  {
+    slug: "razorpay-webhook-not-verified",
+    title: "Razorpay webhook not verified: anyone can fake a payment",
+    summary: "A Razorpay webhook that doesn't check the X-Razorpay-Signature header acts on any JSON posted to it, so someone can mark an order paid without paying.",
+    group: "Data, email and payments",
+    tools: [],
+    symptom: "Orders or subscriptions turn paid when nobody paid, or the webhook route accepts any request sent to it.",
+    cause: "The webhook route reads the event and updates the database without first proving Razorpay sent it. Razorpay signs each event with the webhook secret you chose in its Dashboard, in the `X-Razorpay-Signature` header, and only that signature shows the event is real.",
+    steps: [
+      "Read the raw request body as text before parsing it: the signature is over the exact bytes Razorpay sent.",
+      "Check it with `validateWebhookSignature(rawBody, signature, RAZORPAY_WEBHOOK_SECRET)` from the razorpay package, or compare an HMAC-SHA256 of the raw body, keyed with the secret, to the header. Return 400 when it doesn't match.",
+      "Only then act on `payment.captured`, `order.paid` and the `subscription` events, and make handling the same event twice harmless: Razorpay retries.",
+      "Keep the webhook secret in an environment variable, never in the code."
+    ],
+    ask: "Make the Razorpay webhook route read the raw request body, verify it against the X-Razorpay-Signature header with validateWebhookSignature and RAZORPAY_WEBHOOK_SECRET, return 400 when verification fails, and only then update the database. Handling the same event twice must not change anything.",
+    checks: ["razorpay-webhook"],
+    launchpad: "The launch check flags a Razorpay webhook that skips the signature. Launchpad sets your Razorpay keys and plan ids in every environment, tells you exactly which webhook to add in the Razorpay Dashboard (only partner accounts can create one through Razorpay's API), and keeps reminding you until `RAZORPAY_WEBHOOK_SECRET` is saved.",
+    related: ["stripe-webhook-not-verified", "api-routes-anyone-can-call"]
+  },
+  {
+    slug: "security-headers-missing",
+    title: "No security headers: Content-Security-Policy, HSTS and X-Frame-Options",
+    summary: "Without security headers, other sites can frame your app to trick clicks and injected scripts run freely. Three lines of config close whole classes of attack.",
+    group: "Security holes",
+    tools: [],
+    symptom: "A security scan or a customer's review flags missing headers, or your app can be shown inside someone else's page.",
+    cause: "Browsers only enforce these protections when the server asks for them in response headers. AI tools and starter templates rarely add them, and hosts don't add most of them for you.",
+    steps: [
+      'Next.js: return the headers from `headers()` in `next.config` for every path (`source: "/(.*)"`). Vite and other static apps: set them in `vercel.json`, a `_headers` file on Cloudflare Pages, or your server.',
+      "Start with `Strict-Transport-Security: max-age=63072000; includeSubDomains`, `X-Frame-Options: DENY` (or `frame-ancestors 'none'` in the policy), `X-Content-Type-Options: nosniff` and `Referrer-Policy: strict-origin-when-cross-origin`.",
+      "Add a `Content-Security-Policy` last, listing the scripts, styles and connections your app really uses (your database, payments, analytics). Try it as `Content-Security-Policy-Report-Only` first, so nothing breaks while you tune it.",
+      "Check the result in your browser's developer tools (Network, the page's response headers)."
+    ],
+    ask: "Add security headers to every response: Strict-Transport-Security, X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy strict-origin-when-cross-origin, and a Content-Security-Policy that allows only the scripts, styles, images and connections this app actually uses. Put them in the framework's headers config, not in individual pages.",
+    checks: ["headers"],
+    launchpad: "The launch check looks for these headers in your code and config. Launchpad doesn't set them on your app: they belong in your code, where the request above puts them.",
+    related: ["api-routes-anyone-can-call", "env-file-committed-to-github"]
+  },
+  {
+    slug: "missing-build-script",
+    title: "Missing script: build (npm ERR! when the host builds your app)",
+    summary: `The deploy stops at once with npm's 'Missing script: "build"' when package.json doesn't say how to build the app. One line in package.json fixes it.`,
+    group: "Deploys that break",
+    tools: [],
+    symptom: 'The host\'s build log ends with `npm ERR! Missing script: "build"`, or the host deploys an empty or unbuilt app.',
+    cause: "Hosts run `npm run build` (or the same with pnpm, yarn or bun). Apps exported from AI tools, or started from a bare template, sometimes have only a dev script, or none.",
+    steps: [
+      'Add the framework\'s build command to the `scripts` in `package.json`: `"build": "next build"` for Next.js, `"build": "vite build"` for Vite, `"build": "tsc"` for a TypeScript server.',
+      "Run `npm run build` on your computer and fix anything it reports before you deploy again.",
+      "If the app needs no build (plain HTML), tell the host so: set its output directory to the folder with your `index.html`."
+    ],
+    ask: "Add a build script to package.json that builds this app for production with its framework's own command, run it, and fix any errors it reports.",
+    checks: ["build"],
+    launchpad: "The launch check flags a missing build script before you deploy. When a deploy fails anyway, the console explains the failure in plain words, with a request to paste into your AI tool.",
+    related: ["module-not-found-package-not-installed", "could-not-resolve-works-locally"]
+  },
+  {
+    slug: "builds-differ-from-your-computer",
+    title: "Works on my computer, breaks on deploy: no lockfile, or two of them",
+    summary: "Without one committed lockfile, the host installs different package versions from the ones you tested, and an app that ran yesterday fails to build today.",
+    group: "Deploys that break",
+    tools: [],
+    symptom: "A deploy fails, or the live app misbehaves, though nothing in your code changed and it works on your computer.",
+    cause: "`package.json` allows a range of versions. A lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`) pins the exact ones you installed. With none committed, each deploy picks the newest it's allowed. With two from different package managers, the host chooses one by its own rules, which may not be yours.",
+    steps: [
+      "Pick the package manager you actually use, run its install, and commit the lockfile it writes.",
+      "Delete the other managers' lockfiles from the repository.",
+      "If your host installs with a different manager, set it to yours (Vercel and most hosts follow the lockfile they find)."
+    ],
+    ask: "Make this repository use a single package manager: keep and commit only its lockfile, delete the lockfiles of any other package manager, and make sure installing from the lockfile builds the app.",
+    checks: ["lockfile", "lockfiles"],
+    launchpad: "The launch check flags a missing lockfile, and more than one. Launchpad's deploys install from the lockfile you commit.",
+    related: ["module-not-found-package-not-installed", "missing-build-script"]
+  },
+  {
+    slug: "know-when-your-app-is-down",
+    title: "Find out your app is down before your customers do: a health check URL",
+    summary: "A health URL lets an uptime monitor test your app and its database every few minutes, so an outage reaches you in minutes instead of through an angry email.",
+    group: "Deploys that break",
+    tools: [],
+    symptom: "The first you hear of an outage is a customer telling you, or a dashboard that loads while every page that needs the database fails.",
+    cause: "A home page can load from a cache while the database, sign-in or payments behind it are broken. Monitors that only fetch the home page miss that, and without a monitor nothing is watching at all.",
+    steps: [
+      'Add a route such as `/api/health` that runs one cheap database query and returns 200 with `{"ok":true}`, or 503 when the query fails.',
+      "Keep it fast and free of secrets: no user data, no stack traces.",
+      "Point an uptime monitor at it, checking every few minutes and alerting you by email, Slack or Discord."
+    ],
+    ask: 'Add a GET /api/health route that runs a single lightweight database query and returns 200 with {"ok":true} when it succeeds and 503 when it fails, without revealing any data, secrets or error details.',
+    checks: ["health"],
+    launchpad: "Every Launchpad plan checks each live app every 5 minutes, alerts you by email, Slack or Discord, and can publish a status page. Its starter templates come with `/api/health`.",
+    related: ["missing-environment-variables-in-production"]
   }
 ];
 var fixHref = (slug) => `/fix/${slug}`;
