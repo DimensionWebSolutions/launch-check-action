@@ -130,7 +130,7 @@ var SECRET_PATTERNS = [
   ["Database URL with a password", /\bpostgres(?:ql)?:\/\/[^\s:@/'"`]+:[^\s@/'"`]{6,}@(?!localhost|127\.0\.0\.1|db\b|postgres\b)[^\s'"`]+/]
 ];
 var JWT = /\beyJ[A-Za-z0-9_-]{10,}\.(eyJ[A-Za-z0-9_-]{10,})\.[A-Za-z0-9_-]{10,}/g;
-var PLACEHOLDER = /x{4,}|\.{3}|your|example|placeholder|changeme|dummy|<|0{8,}|12345678|abcdefgh/i;
+var PLACEHOLDER = /x{4,}|\.{3}|your|example|placeholder|changeme|dummy|<|0{8,}|12345678|abcdefgh|:(?:password|passwd|pass|pwd|secret)@/i;
 function findSecrets(path, text) {
   const out = [];
   text.split("\n").forEach((line, i) => {
@@ -565,7 +565,8 @@ function analyse(blobs, files, env, sql) {
     });
   }
   const replitPkgs = [...imports].filter((i) => /^@replit\/(database|object-storage)$/.test(i));
-  const replitLogin = code2.filter(([p, t]) => /(^|\/)replitAuth\.[cm]?[jt]s$/.test(p) || /REPLIT_DOMAINS|replit\.com\/oidc/.test(t));
+  const REPLIT_LOGIN = /\benv(?:\.REPLIT_DOMAINS\b|\[\s*["']REPLIT_DOMAINS["']\s*\])|https?:\/\/replit\.com\/oidc/;
+  const replitLogin = code2.filter(([p, t]) => /(^|\/)replitAuth\.[cm]?[jt]s$/.test(p) || REPLIT_LOGIN.test(t));
   if (replitPkgs.length || replitLogin.length) {
     const what = [...replitLogin.length ? ["sign-in with Replit accounts"] : [], ...replitPkgs.map((x) => x === "@replit/database" ? "Replit Database" : "Replit Object Storage")];
     add({
@@ -575,7 +576,7 @@ function analyse(blobs, files, env, sql) {
       status: "fail",
       detail: `The app relies on ${what.join(" and ")}, which ${what.length === 1 ? "exists" : "exist"} only inside Replit. Anywhere else, ${replitLogin.length ? "nobody can sign in" : "saving and loading data fails"}.`,
       fix: "Before moving it: switch sign-in to Clerk or Supabase Auth, files to Cloudflare R2 or Supabase Storage, and Replit Database records into Postgres. Replit's agent, or your AI tool, can make the change.",
-      where: [...replitLogin.map(([p, t]) => `${p}:${lineOf(t, /REPLIT_DOMAINS|replit\.com\/oidc|./)}`), ...code2.filter(([, t]) => /["']@replit\/(database|object-storage)["']/.test(t)).map(([p, t]) => `${p}:${lineOf(t, /@replit\//)}`)].slice(0, WHERE)
+      where: [...replitLogin.map(([p, t]) => `${p}:${lineOf(t, REPLIT_LOGIN) || 1}`), ...code2.filter(([, t]) => /["']@replit\/(database|object-storage)["']/.test(t)).map(([p, t]) => `${p}:${lineOf(t, /@replit\//)}`)].slice(0, WHERE)
     });
   }
   const LISTEN = /\.listen\(\s*(?:\{\s*port\s*:\s*)?(\d{4,5})\b|\bconst\s+port\s*=\s*(\d{4,5})\s*;/;
@@ -765,7 +766,7 @@ var FIXES = [
     symptom: "A white screen, `supabaseUrl is required`, `undefined` in place of a value, or sign-in redirecting to `localhost`, only once deployed.",
     cause: "The code reads values like `VITE_SUPABASE_URL` from the environment. Your `.env` file, or the tool's secrets panel, set them where you built it; the new host has none of them. Links or sign-in redirects written as `http://localhost:…` break in the same way.",
     steps: [
-      "List every variable the code reads (`process.env.X`, `import.meta.env.X`) in a `.env.example`, names only.",
+      "List every variable the code reads from `process.env` or `import.meta.env` in a `.env.example`, names only.",
       "Set each one at the host for production and previews. Values that start with `NEXT_PUBLIC_` or `VITE_` are visible to everyone: never put a secret in one.",
       "Replace hard-coded `localhost` addresses with a variable such as `NEXT_PUBLIC_SITE_URL`.",
       "Redeploy: most hosts only read variables at build time."
@@ -852,7 +853,7 @@ var FIXES = [
     summary: "An AI client created with dangerouslyAllowBrowser, or a key behind a VITE_ or NEXT_PUBLIC_ prefix, puts your API key in the page, where anyone can copy it and spend on your account.",
     group: "Security holes",
     tools: ["lovable", "bolt", "v0"],
-    symptom: "The OpenAI or Anthropic client is created in a component, with `dangerouslyAllowBrowser: true`, or the key is read from `VITE_OPENAI_API_KEY` or `NEXT_PUBLIC_…`.",
+    symptom: "The OpenAI or Anthropic client is created in a component, with `dangerouslyAllowBrowser` set to `true`, or the key is read from `VITE_OPENAI_API_KEY` or `NEXT_PUBLIC_…`.",
     cause: "Anything the browser runs, every visitor can read. A public prefix means the value is bundled into the JavaScript everyone downloads.",
     steps: [
       "Revoke the key in the provider's dashboard now: it has already shipped.",
