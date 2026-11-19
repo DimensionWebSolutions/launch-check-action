@@ -127,10 +127,12 @@ var SECRET_PATTERNS = [
   ["Razorpay secret", /\bRAZORPAY_KEY_SECRET\s*[=:]\s*["']?[A-Za-z0-9]{20,}/],
   ["Slack webhook", /hooks\.slack\.com\/services\/T[A-Za-z0-9]+\/B[A-Za-z0-9]+\/[A-Za-z0-9]{20,}/],
   ["Private key", /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----/],
-  ["Database URL with a password", /\bpostgres(?:ql)?:\/\/[^\s:@/'"`]+:[^\s@/'"`]{6,}@(?!localhost|127\.0\.0\.1|db\b|postgres\b)[^\s'"`]+/]
+  // Local and Docker hosts ("db", "postgres") are a developer's own machine; a host that only starts
+  // with "db." (db.<project>.supabase.co, db.example-company.com) is a real server.
+  ["Database URL with a password", /\bpostgres(?:ql)?:\/\/[^\s:@/'"`]+:[^\s@/'"`]{6,}@(?!(?:localhost|127\.0\.0\.1|db|postgres)(?:[:/'"`\s]|$))[^\s'"`]+/]
 ];
 var JWT = /\beyJ[A-Za-z0-9_-]{10,}\.(eyJ[A-Za-z0-9_-]{10,})\.[A-Za-z0-9_-]{10,}/g;
-var PLACEHOLDER = /x{4,}|\.{3}|your|example|placeholder|changeme|dummy|<|0{8,}|12345678|abcdefgh|:(?:password|passwd|pass|pwd|secret)@/i;
+var PLACEHOLDER = /x{4,}|\.{3}|your|example|placeholder|changeme|dummy|<|0{8,}|12345678|abcdefgh|@(?:host|hostname|server|dbhost|db-host)(?=[:/]|$)/i;
 function findSecrets(path, text) {
   const out = [];
   text.split("\n").forEach((line, i) => {
@@ -225,14 +227,17 @@ function analyse(blobs, files, env, sql) {
   } else {
     add({ id: "secrets", group: "Security", title: "No secret keys in the code", status: "pass", detail: "None of the files read contain a recognisable API key, private key or password." });
   }
-  const leaky = realEnv.filter((p) => envFileNames(files.get(p) ?? "").some((n) => !PUBLIC_PREFIX.test(n)));
+  const leaky = realEnv.filter((p) => {
+    const text2 = files.get(p);
+    return text2 === void 0 || envFileNames(text2).some((n) => !PUBLIC_PREFIX.test(n));
+  });
   if (leaky.length) {
     add({
       id: "env-files",
       group: "Security",
       title: ".env file committed",
       status: "fail",
-      detail: `${leaky.length === 1 ? "A .env file is" : `${leaky.length} .env files are`} in the repo, with values that aren't meant for the browser. These usually hold real keys.`,
+      detail: `${leaky.length === 1 ? "A .env file is" : `${leaky.length} .env files are`} in the repo, with values that aren't meant for the browser, or that couldn't be read. These usually hold real keys.`,
       fix: "Remove the file from git (git rm --cached), add .env* to .gitignore, and rotate any keys it held. Keep a .env.example with names only.",
       where: leaky.slice(0, WHERE),
       launchpad: true
@@ -243,7 +248,7 @@ function analyse(blobs, files, env, sql) {
       group: "Security",
       title: ".env file committed, with public values only",
       status: "warn",
-      detail: `${realEnv.length === 1 ? "A .env file is" : `${realEnv.length} .env files are`} in the repo. Every value in ${realEnv.length === 1 ? "it" : "them"} has a browser prefix, so the live app shows ${realEnv.length === 1 ? "it" : "them"} to every visitor anyway: nothing has leaked. But the next key added there will be in git history for good.`,
+      detail: `${realEnv.length === 1 ? "A .env file is" : `${realEnv.length} .env files are`} in the repo. Every value in ${realEnv.length === 1 ? "it" : "them"} is empty or has a browser prefix, so the live app shows ${realEnv.length === 1 ? "it" : "them"} to every visitor anyway: nothing has leaked. But the next key added there will be in git history for good.`,
       fix: "Remove the file from git (git rm --cached), add .env* to .gitignore, and keep a .env.example with names only.",
       where: realEnv.slice(0, WHERE),
       launchpad: true
@@ -565,7 +570,7 @@ function analyse(blobs, files, env, sql) {
     });
   }
   const replitPkgs = [...imports].filter((i) => /^@replit\/(database|object-storage)$/.test(i));
-  const REPLIT_LOGIN = /\benv(?:\.REPLIT_DOMAINS\b|\[\s*["']REPLIT_DOMAINS["']\s*\])|https?:\/\/replit\.com\/oidc/;
+  const REPLIT_LOGIN = /\benv(?:\??\.REPLIT_DOMAINS\b|\[\s*["']REPLIT_DOMAINS["']\s*\])|\{[^}]*\bREPLIT_DOMAINS\b[^}]*\}\s*=\s*process\.env\b|https?:\/\/replit\.com\/oidc/;
   const replitLogin = code2.filter(([p, t]) => /(^|\/)replitAuth\.[cm]?[jt]s$/.test(p) || REPLIT_LOGIN.test(t));
   if (replitPkgs.length || replitLogin.length) {
     const what = [...replitLogin.length ? ["sign-in with Replit accounts"] : [], ...replitPkgs.map((x) => x === "@replit/database" ? "Replit Database" : "Replit Object Storage")];
